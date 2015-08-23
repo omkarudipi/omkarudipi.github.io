@@ -1,0 +1,198 @@
+---
+title: "Practical Machine Learning: Predicting the manner in which exercise-device users did the exercise"
+author: "Omkar Udipi"
+date: "20 August 2015"
+output: html_document
+---
+
+## Executive Summary
+
+The objective of this project is to predict the manner in which exercise-device users did the exercise. This is the "classe" variable in the training set. This project will analyze and determine which variables to predict with. The report will describe how the model is built, cross-validation used, expected out of sample error, and reasons for the decisions made.
+
+
+## Background 
+
+Using exercise devices such as Jawbone Up, Nike FuelBand, and Fitbit, it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+## Source Data, R Libraries, Defaults
+
+* Primary source (with thanks): http://groupware.les.inf.puc-rio.br/har
+* Training data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+* Test data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+R Libraries used (if unavailable, please install first):
+
+```{r}
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(ggplot2)
+library(randomForest)
+```
+
+Setting the seed:
+
+```{r}
+set.seed(9090)
+```
+
+
+## Getting the data
+
+```{r}
+trainUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+trainFile <- "pml-training.csv"
+testFile <- "pml-testing.csv"
+
+## Commented below to avoid redownloading the file - files have already been downloaded (using MAC OSX)
+# download.file(url=trainUrl, destfile = trainFile, method="curl")
+# download.file(url=testUrl, destfile = Assignments, method="curl")
+                            
+training <- read.csv(trainFile, na.strings=c("NA","#DIV/0!",""))
+testing <- read.csv(testFile, na.strings=c("NA","#DIV/0!",""))
+```
+
+## Tidying the data
+
+### Step 1: Analyzing the data. 
+
+Noticed a quite a few near zero values and NAs. First, we will duplicate training data frame into 'training_filter'. To save space, we will apply each tidy step to 'training_filter'.
+
+### Step 2: Identify and remove columns with near zero value 
+
+```{r}
+NZVtrainingData_position <- nearZeroVar(training,saveMetrics=FALSE) 
+fig1 <- names(training[c(NZVtrainingData_position)]) # columns having near zero values
+training_filter <- training[-c(NZVtrainingData_position)] 
+```
+
+*Table 1*
+```{r,fig.cap="Figure 1", echo=FALSE}
+print(fig1)
+```
+
+### Step 3: Identify and remove columns irrelevant columns
+
+For this project, we will exclude columns  
+* which contain timeframes
+* 'X', 'user_name', 'num_window'
+because these values are not relevant to predict classe using the sensor readings.
+
+```{r}
+exclude_vars1 <- names(training_filter) %in% c("X","user_name","raw_timestamp_part_1","raw_timestamp_part_2"
+                                               ,"cvtd_timestamp","new_window","num_window")
+training_filter  <- training_filter[!exclude_vars1]
+```
+
+
+### Step 4: Identify and remove columns with many NA values
+
+This step is fairly manual process and it involves using 'summary()' to determine which columns have large NA count. From the analysis, we found there were many similar-looking columns that had many NAs and appear to be covariates produced by the researchers.
+
+```{r}
+exclude_vars2_NA <- grep("^var|^avg|^max|^min|^std|^amplitude|^kurtosis|^skewness",names(training_filter))
+fig2 <- summary(training_filter[c(exclude_vars2_NA)]) # column summary of those with many NAs
+training_filter <- training_filter[-c(exclude_vars2_NA)]
+```
+*Figure 2*
+```{r,fig.cap="Figure 2", echo=FALSE}
+print(fig2)
+```
+
+### Step 5: Identify and remove columns which contain highly correlated variables 
+
+This step tries to reduce the number of columns by determining highly correlated pairs (cutoff @75%). When found, we will exclude one of the pair. This would serve to reduce computation on similar correlated and make the training model more efficient.
+
+```{r}
+training_filter_no_class <- training_filter[-c(dim(training_filter))]
+exclude_vars3_correlated <- findCorrelation(cor(training_filter_no_class), cutoff= 0.75) # set cutoff at 75%
+fig3 <- names(training_filter[c(exclude_vars3_correlated)]) # columns having highly correlated values
+training_filter <- training_filter[-c(exclude_vars3_correlated)]
+```
+*Figure 3*
+```{r,fig.cap="Figure 3", echo=FALSE}
+print(fig3)
+```
+
+### Review and Replicate to Test dataset
+
+Tidying is completed. Replicate Steps sequentially on test data onto 'test_filter'. Compare filtered training and test datasets to confirm if column dimensions match. If ok, proceed to train the model using the training set.
+ 
+```{r}
+test_filter <- testing[-c(NZVtrainingData_position)]
+test_filter <- test_filter[!exclude_vars1]
+test_filter <- test_filter[-c(exclude_vars2_NA)]
+test_filter <- test_filter[-c(exclude_vars3_correlated)]
+dim(training_filter); dim(test_filter)
+```
+
+
+## FeaturePlot 
+Compare classe against all filtered variables (except classe).
+
+*Figure 4*
+.
+
+```{r, fig.cap="Figure 4"}
+
+featurePlot(x=training_filter[,-32],y=training_filter[,32])
+```
+
+## Cross validation strategy
+For this case, we have split the training data into training (75%) and validation (25%) as we have quite a large number of samples.
+
+```{r}
+inTrain <- createDataPartition(y=training_filter$classe, p=0.75, list=FALSE)
+trainingData <- training_filter[inTrain, ]; 
+validationData <- training_filter[-inTrain, ]
+```
+
+## Train our model using randomforest
+
+```{r}
+classeFit <- randomForest(classe ~. , data=trainingData)
+```
+
+## Predict using Validation Data
+
+Predict using our randomforest model using our validation data and compare the predicted values against the validation data's actual classe values.
+
+```{r}
+predFitTrain <- predict(classeFit,validationData[,-32], type = "class")
+fig5 <- confusionMatrix(predFitTrain, validationData$classe)
+```
+*Figure 5*
+```{r,fig.cap="Figure 5", echo=FALSE}
+print(fig5)
+```
+
+## Conclusion
+Although not perfect as seen in the matrix, RandomForest does give us quite a high accuracy (>99%). The other statistics also look favorable. We will proceed to use this model to predict our Test data.
+
+
+## Predict using Test Data
+
+Predict using our randomforest model using our Test data and output the predicted test values
+
+```{r}
+predFitTest <- predict(classeFit,test_filter[,-32])
+```
+*Figure 6*
+```{r,fig.cap="Figure 6", echo=FALSE}
+print(predFitTest)
+```
+
+## Output predicted test values to files for submission
+
+```{r}
+pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+
+pml_write_files(predFitTest)
+```
